@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 *.ogg
 *.mp3
+*.log
+nohup.out

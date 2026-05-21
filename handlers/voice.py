@@ -27,7 +27,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_data = {k: conversation.get(k, "") for k in REQUIRED_FIELDS}
     current_data["price"] = conversation.get("price", "")
 
-    result = gemini.process_audio(audio_data, current_data)
+    result = await gemini.process_audio_async(audio_data, current_data)
     reply = result.get("reply", "Извините, не удалось распознать голосовое сообщение.")
 
     extracted = result.get("extracted", {})

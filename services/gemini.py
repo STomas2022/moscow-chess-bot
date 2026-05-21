@@ -2,6 +2,7 @@ import json
 import logging
 import tempfile
 import os
+import asyncio
 import warnings
 
 with warnings.catch_warnings():
@@ -104,6 +105,8 @@ SYSTEM_PROMPT = """Ты — профессиональный администр�
 Не используй markdown в reply, только обычный текст.
 Не придумывай данные за клиента — только то, что он сказал."""
 
+TIMEOUT_SECONDS = 25
+
 
 class GeminiService:
     def __init__(self):
@@ -118,32 +121,86 @@ class GeminiService:
             },
         )
 
+    def _extract_json(self, text: str) -> dict:
+        if text.startswith("```json"):
+            text = text.split("```json")[1]
+            if "```" in text:
+                text = text.split("```")[0]
+        elif text.startswith("```"):
+            text = text.split("```")[1]
+            if "```" in text:
+                text = text.split("```")[0]
+        return json.loads(text.strip())
+
+    def _generate(self, prompt: str) -> str:
+        response = self.model.generate_content(
+            prompt,
+            request_options={"timeout": TIMEOUT_SECONDS * 1000},
+        )
+        return response.text.strip()
+
+    async def process_message_async(self, user_message: str, current_data: dict) -> dict:
+        current_data_str = json.dumps(current_data, ensure_ascii=False, indent=2)
+        prompt = f"ТЕКУЩИЕ ДАННЫЕ О КЛИЕНТЕ:\n{current_data_str}\n\nСООБЩЕНИЕ КЛИЕНТА:\n{user_message}"
+
+        try:
+            text = await asyncio.wait_for(
+                asyncio.to_thread(self._generate, prompt),
+                timeout=TIMEOUT_SECONDS,
+            )
+            result = self._extract_json(text)
+            return result
+        except asyncio.TimeoutError:
+            logger.error("Gemini timeout (%ds)", TIMEOUT_SECONDS)
+            return {"extracted": {}, "reply": "Извините, ответ занимает больше времени. Попробуйте ещё раз."}
+        except json.JSONDecodeError as e:
+            logger.error("Gemini JSON error: %s", e)
+            logger.error("Ответ: %s", text[:300] if "text" in dir() else "пусто")
+            return {"extracted": {}, "reply": "Извините, произошла ошибка. Повторите, пожалуйста."}
+        except Exception as e:
+            logger.error("Gemini error: %s", e)
+            return {"extracted": {}, "reply": "Извините, техническая ошибка. Попробуйте позже."}
+
     def process_message(self, user_message: str, current_data: dict) -> dict:
         current_data_str = json.dumps(current_data, ensure_ascii=False, indent=2)
         prompt = f"ТЕКУЩИЕ ДАННЫЕ О КЛИЕНТЕ:\n{current_data_str}\n\nСООБЩЕНИЕ КЛИЕНТА:\n{user_message}"
 
         try:
-            response = self.model.generate_content(prompt)
-            text = response.text.strip()
-
-            if text.startswith("```json"):
-                text = text.split("```json")[1]
-                if "```" in text:
-                    text = text.split("```")[0]
-            elif text.startswith("```"):
-                text = text.split("```")[1]
-                if "```" in text:
-                    text = text.split("```")[0]
-
-            text = text.strip()
-            return json.loads(text)
+            text = self._generate(prompt)
+            return self._extract_json(text)
         except json.JSONDecodeError as e:
-            logger.error("Gemini вернул невалидный JSON: %s", e)
-            logger.error("Текст ответа: %s", text[:500] if "text" in dir() else "пусто")
+            logger.error("Gemini JSON error: %s", e)
             return {"extracted": {}, "reply": "Извините, произошла ошибка. Повторите, пожалуйста."}
         except Exception as e:
-            logger.error("Ошибка Gemini: %s", e)
+            logger.error("Gemini error: %s", e)
             return {"extracted": {}, "reply": "Извините, техническая ошибка. Попробуйте позже."}
+
+    async def process_audio_async(self, audio_bytes: bytes, current_data: dict) -> dict:
+        tmp_path = None
+        try:
+            current_data_str = json.dumps(current_data, ensure_ascii=False, indent=2)
+            prompt = f"Расшифруй голосовое сообщение клиента и извлеки данные.\n\nТЕКУЩИЕ ДАННЫЕ О КЛИЕНТЕ:\n{current_data_str}"
+
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+
+            def _do_audio():
+                audio_file = genai.upload_file(tmp_path, display_name="voice.ogg", mime_type="audio/ogg")
+                response = self.model.generate_content([prompt, audio_file])
+                return response.text.strip()
+
+            text = await asyncio.wait_for(
+                asyncio.to_thread(_do_audio),
+                timeout=TIMEOUT_SECONDS + 10,
+            )
+            return self._extract_json(text)
+        except Exception as e:
+            logger.error("Audio error: %s", e)
+            return {"extracted": {}, "reply": "Не удалось распознать голосовое сообщение. Напишите, пожалуйста, текстом."}
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
     def process_audio(self, audio_bytes: bytes, current_data: dict) -> dict:
         tmp_path = None
@@ -157,21 +214,9 @@ class GeminiService:
 
             audio_file = genai.upload_file(tmp_path, display_name="voice.ogg", mime_type="audio/ogg")
             response = self.model.generate_content([prompt, audio_file])
-            text = response.text.strip()
-
-            if text.startswith("```json"):
-                text = text.split("```json")[1]
-                if "```" in text:
-                    text = text.split("```")[0]
-            elif text.startswith("```"):
-                text = text.split("```")[1]
-                if "```" in text:
-                    text = text.split("```")[0]
-
-            text = text.strip()
-            return json.loads(text)
+            return self._extract_json(response.text.strip())
         except Exception as e:
-            logger.error("Ошибка обработки аудио через Gemini: %s", e)
+            logger.error("Audio error: %s", e)
             return {"extracted": {}, "reply": "Не удалось распознать голосовое сообщение. Напишите, пожалуйста, текстом."}
         finally:
             if tmp_path and os.path.exists(tmp_path):

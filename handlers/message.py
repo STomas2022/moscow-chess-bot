@@ -21,7 +21,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_data = {k: conversation.get(k, "") for k in REQUIRED_FIELDS}
     current_data["price"] = conversation.get("price", "")
 
-    result = gemini.process_message(text, current_data)
+    result = await gemini.process_message_async(text, current_data)
     reply = result.get("reply", "Извините, не могу обработать сообщение.")
 
     extracted = result.get("extracted", {})
